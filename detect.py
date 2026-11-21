@@ -1,84 +1,85 @@
+import html as htmllib
+import io
 import re
 import subprocess
 import sys
 
-import requests
-
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "curl_cffi"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "curl_cffi", "pdfplumber"])
+import pdfplumber
 from curl_cffi import requests as creq
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-FULL = {
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-}
-URLS = [
-    "https://www.manulife.com.hk/",
-    "https://www.manulife.com.hk/zh-hk/individual/products/understanding-your-participating-policy/fulfillment-ratio.html",
-    "https://www.manulife.com.hk/content/dam/insurance/hk/zh-hk/documents/products/product-services/fulfillment-ratio.pdf",
-]
-
-
-def plain(url):
-    return requests.get(url, headers=FULL, timeout=60)
-
-
-def chrome(url):
-    return creq.get(url, impersonate="chrome", timeout=60)
-
-
-def safari(url):
-    return creq.get(url, impersonate="safari", timeout=60)
-
-
-METHODS = [("A 完整瀏覽器標頭", plain), ("B 模擬 Chrome", chrome), ("C 模擬 Safari", safari)]
+BASE = "https://www.manulife.com.hk"
+PAGE = BASE + "/zh-hk/individual/products/understanding-your-participating-policy/fulfillment-ratio.html"
+PDF = BASE + "/content/dam/insurance/hk/zh-hk/documents/products/product-services/fulfillment-ratio.pdf"
 PCT = re.compile(r"\d+(?:\.\d+)?\s*%")
-LINK = re.compile(r'["\']([^"\']+\.(?:json|pdf|xlsx|csv)[^"\']*)["\']', re.I)
+FILES = re.compile(r"[\w/.:%~\-]+\.(?:pdf|json|xlsx|xls|csv)\b", re.I)
 
 
-def details(content):
-    page = content.decode("utf-8", "replace")
-    tables = re.findall(r"<table\b.*?</table>", page, flags=re.S | re.I)
-    print(f"  表格 {len(tables)} 個｜百分比數字 {len(PCT.findall(page))} 個")
-    print(f"  「分紅實現率」{page.count('分紅實現率')} 次｜「總現金價值」{page.count('總現金價值')} 次")
-    links = sorted(set(LINK.findall(page)))
-    print(f"  資料檔連結 {len(links)} 個：")
-    for link in links[:40]:
-        print("    ", link[:200])
-    print("  內嵌頁面：", re.findall(r'<iframe\b[^>]*src="([^"]+)"', page, flags=re.I)[:10])
-    for t in tables[:2]:
-        print("  表格例子：", re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", t))[:600])
-    body = re.sub(r"<(script|style)\b.*?</\1>|<[^>]+>", " ", page, flags=re.S | re.I)
-    body = re.sub(r"\s+", " ", body)
-    i = max(body.find("分紅實現率"), 0)
-    print("  內文例子：", body[i:i + 600])
+def get(url):
+    return creq.get(url, impersonate="chrome", timeout=180)
 
 
-for url in URLS:
-    print("=" * 30)
-    print(url)
-    shown = False
-    for name, fn in METHODS:
+def one_line(s):
+    return re.sub(r"\s+", " ", s)
+
+
+print("=== 第一部分：網頁 ===")
+r = get(PAGE)
+page = htmllib.unescape(r.content.decode("utf-8", "replace")).replace("\\/", "/")
+print(f"狀態 {r.status_code}｜大小 {len(r.content) // 1024} KB")
+files = sorted(set(FILES.findall(page)))
+print(f"檔案連結 {len(files)} 個：")
+for f in files[:40]:
+    print("  ", f[:160])
+seen = set()
+for m in re.finditer("分紅實現率", page):
+    snippet = one_line(page[max(m.start() - 120, 0):m.end() + 200])
+    if snippet not in seen:
+        seen.add(snippet)
+        print(f"出現位置 {len(seen)}：", snippet)
+try:
+    r2 = get(PAGE.replace(".html", ".model.json"))
+    body = r2.content.decode("utf-8", "replace")
+    print(f"model.json：狀態 {r2.status_code}｜大小 {len(r2.content) // 1024} KB｜百分比數字 {len(PCT.findall(body))} 個")
+except Exception as e:
+    print("model.json 失敗：", str(e)[:150])
+
+print()
+print("=== 第二部分：PDF ===")
+r = get(PDF)
+data = r.content
+print(f"狀態 {r.status_code}｜大小 {len(data) // 1024} KB｜是 PDF：{data[:4] == b'%PDF'}")
+texts, tables_by_page = [], []
+with pdfplumber.open(io.BytesIO(data)) as pdf:
+    for p in pdf.pages:
         try:
-            r = fn(url)
+            texts.append(p.extract_text() or "")
+            tables_by_page.append(p.extract_tables() or [])
         except Exception as e:
-            print(f"{name}：失敗 {str(e)[:150]}")
-            continue
-        kind = r.headers.get("Content-Type", "")
-        content = r.content
-        print(f"{name}：狀態 {r.status_code}｜類型 {kind}｜大小 {len(content) // 1024} KB")
-        if r.status_code != 200 or shown:
-            continue
-        shown = True
-        if content[:4] == b"%PDF":
-            print("  這是 PDF 檔，可以下載")
-        elif "html" in kind:
-            details(content)
+            texts.append("")
+            tables_by_page.append([])
+            print(f"第 {len(texts)} 頁讀取失敗：{str(e)[:100]}")
+n = len(texts)
+pcts = [len(PCT.findall(t)) for t in texts]
+print(f"頁數 {n}｜有文字的頁 {sum(1 for t in texts if t.strip())}"
+      f"｜有表格的頁 {sum(1 for t in tables_by_page if t)}"
+      f"｜表格總數 {sum(len(t) for t in tables_by_page)}｜百分比數字 {sum(pcts)} 個")
+print("每頁（頁碼:表格數/百分比數）：",
+      " ".join(f"{i + 1}:{len(tables_by_page[i])}/{pcts[i]}" for i in range(n)))
+for i in range(min(2, n)):
+    print(f"第 {i + 1} 頁文字：", one_line(texts[i])[:400])
+target = next((i for i in range(n) if tables_by_page[i] and pcts[i] >= 5), None)
+if target is None:
+    print("找不到同時有表格和百分比數字的頁")
+else:
+    print(f"第 {target + 1} 頁（第一個有數字的表格頁）文字：", one_line(texts[target])[:600])
+    for row in tables_by_page[target][0][:8]:
+        print("  表格行：", "｜".join(one_line(str(c)) if c is not None else "" for c in row)[:220])
+for key in ("盈傳創富", "總現金價值比率"):
+    hit = next((i for i in range(n) if key in texts[i]), None)
+    if hit is None:
+        print(f"「{key}」：整份 PDF 找不到")
+    else:
+        t = one_line(texts[hit])
+        j = t.find(key)
+        print(f"「{key}」首次出現在第 {hit + 1} 頁：", t[max(j - 80, 0):j + 320])
