@@ -33,6 +33,7 @@ THIN = Side(style="thin", color="BFBFBF")
 BOX = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 ROW_HEIGHT = 34
+HEAD_ROW = 3
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -181,27 +182,28 @@ def pct_format(v):
     return "0%" if abs(v * 100 - round(v * 100)) < 1e-6 else "0.0%"
 
 
+def numbers(rows):
+    return [v for r in rows for v in r["vals"].values() if isinstance(v, float)]
+
+
+def mean(nums):
+    return sum(nums) / len(nums) if nums else None
+
+
 def averages(rows, ycols):
-    out = []
-    for k in ycols:
-        nums = [r["vals"][k] for r in rows if isinstance(r["vals"].get(k), float)]
-        out.append(sum(nums) / len(nums) if nums else None)
-    return out
+    return [mean([r["vals"][k] for r in rows if isinstance(r["vals"].get(k), float)]) for k in ycols]
 
 
 def cumulative(rows, ycols):
-    out = []
-    for i in range(len(ycols)):
-        nums = [r["vals"][k] for r in rows for k in ycols[i:] if isinstance(r["vals"].get(k), float)]
-        out.append(sum(nums) / len(nums) if nums else None)
-    return out
+    return [mean([r["vals"][k] for r in rows for k in ycols[i:] if isinstance(r["vals"].get(k), float)])
+            for i in range(len(ycols))]
 
 
 def hold_label(i, key):
     if i == 0:
         return "所有年份平均值"
     n = key.replace("保單年度", "")
-    return f"持滿{n[:-1]}年+平均值" if n.endswith("+") else f"持滿{n}年平均值"
+    return f"持滿 {n[:-1]} 年以上平均值" if n.endswith("+") else f"持滿 {n} 年平均值"
 
 
 def head_cell(c):
@@ -216,7 +218,7 @@ def write_averages(ws, start, rows, ycols, nlead):
     groups = [("所有分紅" if len(kinds) > 1 else "全部", rows)]
     if len(kinds) > 1:
         groups += [(k, [x for x in rows if x["kind"] == k]) for k in kinds]
-    groups = [(t, s) for t, s in groups if any(isinstance(v, float) for x in s for v in x["vals"].values())]
+    groups = [(t, s) for t, s in groups if numbers(s)]
     r = start
     c = ws.cell(row=r, column=1, value="平均值（固定數字，不隨篩選變化；只計算有百分比的格）")
     c.font = Font(bold=True, size=11, color=NAVY)
@@ -224,14 +226,14 @@ def write_averages(ws, start, rows, ycols, nlead):
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last)
     ws.row_dimensions[r].height = 24
     r += 1
-    tables = (("當年平均值（各保單年度）", ycols, averages),
-              ("持滿年期平均值（該年度及之後合併計算）", [hold_label(i, k) for i, k in enumerate(ycols)], cumulative))
+    tables = (("持滿年期平均值（該年度及之後合併計算）", [hold_label(i, k) for i, k in enumerate(ycols)], cumulative),
+              ("當年平均值（各保單年度）", ycols, averages))
     for heading, heads, fn in tables:
         head_cell(ws.cell(row=r, column=1, value=heading))
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=nlead)
         for j, h in enumerate(heads):
             head_cell(ws.cell(row=r, column=nlead + 1 + j, value=h))
-        ws.row_dimensions[r].height = 32
+        ws.row_dimensions[r].height = 46
         r += 1
         for title, sub in groups:
             c = ws.cell(row=r, column=1, value=title)
@@ -251,7 +253,7 @@ def write_averages(ws, start, rows, ycols, nlead):
         r += 1
 
 
-def write_sheet(ws, rows, ycols, ysubs, kind_head):
+def write_sheet(ws, title, rows, ycols, ysubs, kind_head):
     cols = [("產品名稱", 30, "name"), ("產品種類", 14, "cat"), ("保單生效時期", 22, "period"), ("保單貨幣", 9, "cur")]
     if len(set(r["kind"] for r in rows)) > 1:
         cols.append((kind_head, 11, "kind"))
@@ -259,11 +261,21 @@ def write_sheet(ws, rows, ycols, ysubs, kind_head):
         cols.append(("備註", 16, "note"))
     heads = [c[0] for c in cols] + [(k + "\n" + ysubs.get(k, "")).strip() for k in ycols]
     widths = [c[1] for c in cols] + [13] * len(ycols)
+    c = ws.cell(row=1, column=1, value=title)
+    c.font = Font(bold=True, size=14, color=NAVY)
+    c.alignment = Alignment(vertical="center")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(heads))
+    ws.row_dimensions[1].height = 28
+    c = ws.cell(row=2, column=1, value="100% 或以上綠底，低於 80% 紅底｜「不適用」為宏利網站原文｜固定平均值在表格底部")
+    c.font = Font(size=9, color=GREY)
+    c.alignment = Alignment(vertical="center")
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(heads))
+    ws.row_dimensions[2].height = 18
     for i, (h, w) in enumerate(zip(heads, widths), 1):
-        head_cell(ws.cell(row=1, column=i, value=h))
+        head_cell(ws.cell(row=HEAD_ROW, column=i, value=h))
         ws.column_dimensions[get_column_letter(i)].width = w
-    ws.row_dimensions[1].height = 62
-    ri, prev = 1, None
+    ws.row_dimensions[HEAD_ROW].height = 62
+    ri, prev = HEAD_ROW, None
     for r in rows:
         if r["name"] != prev:
             if prev is not None:
@@ -302,65 +314,90 @@ def write_sheet(ws, rows, ycols, ysubs, kind_head):
             else:
                 c.font = Font(size=9, color=GREY)
         ws.row_dimensions[ri].height = ROW_HEIGHT
-    ws.freeze_panes = "B2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(heads))}{max(ri, 2)}"
+    ws.freeze_panes = f"B{HEAD_ROW + 1}"
+    ws.auto_filter.ref = f"A{HEAD_ROW}:{get_column_letter(len(heads))}{max(ri, HEAD_ROW + 1)}"
     write_averages(ws, ri + 2, rows, ycols, len(cols))
     ws.sheet_view.showGridLines = False
     ws.page_setup.orientation = "landscape"
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
-    ws.print_title_rows = "1:1"
+    ws.print_title_rows = f"{HEAD_ROW}:{HEAD_ROW}"
 
 
-def write_overview(ws, sheets, ycols, year, now):
-    last = 2 + len(ycols)
+def write_overview(ws, sheets, year, now):
+    ncol = 6
     ws.sheet_view.showGridLines = False
-    ws.column_dimensions["A"].width = 34
-    ws.column_dimensions["B"].width = 9
-    for i in range(len(ycols)):
-        ws.column_dimensions[get_column_letter(3 + i)].width = 12
+    ws.column_dimensions["A"].width = 38
+    for i in range(2, ncol + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 17
 
     def text(r, s, bold=False, size=10, height=None, color="000000"):
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=ncol)
         c = ws.cell(row=r, column=1, value=s)
         c.font = Font(bold=bold, size=size, color=color)
         c.alignment = Alignment(vertical="center", wrap_text=True)
         if height:
             ws.row_dimensions[r].height = height
 
-    text(1, f"宏利 分紅實現率及總現金價值比率（{year} 申報年度）", True, 14, 28, NAVY)
-    text(2, f"自動生成｜擷取時間：{now}（香港時間）｜資料來源：宏利香港網站")
-    text(3, PAGE, color="0563C1")
-    text(5, "各保單年度平均值（固定數字，不隨篩選變化；只計算有百分比的格）", True, 11, 22, NAVY)
-    for i, h in enumerate(["項目", "行數"] + ycols, 1):
-        head_cell(ws.cell(row=6, column=i, value=h))
-    ws.row_dimensions[6].height = 24
-    r = 7
-    for label, rows, _ in sheets:
-        kinds = list(dict.fromkeys(x["kind"] for x in rows))
-        groups = [(f"{label}（全部）", rows)]
-        if len(kinds) > 1:
-            groups += [(f"{label}－{k}", [x for x in rows if x["kind"] == k]) for k in kinds]
-        for title, sub in groups:
-            cells = [title, len(sub)] + averages(sub, ycols)
-            for i, v in enumerate(cells, 1):
-                c = ws.cell(row=r, column=i, value=v)
+    def table(r, heads, lines, fmts):
+        for i, h in enumerate(heads, 1):
+            head_cell(ws.cell(row=r, column=i, value=h))
+        ws.row_dimensions[r].height = 30
+        for line in lines:
+            r += 1
+            for i, v in enumerate(line, 1):
+                c = ws.cell(row=r, column=i, value=v if v is not None else "/")
                 c.border = BOX
                 c.font = Font(size=10, bold=i == 1)
                 c.alignment = Alignment(horizontal="left" if i == 1 else "center", vertical="center")
-                if i > 2 and v is not None:
-                    c.number_format = "0.0%"
-            r += 1
+                if isinstance(v, float):
+                    c.number_format = fmts.get(i, "0.00%")
+            ws.row_dimensions[r].height = 22
+        return r + 2
+
+    def stat(title, sub):
+        nums = numbers(sub)
+        low = len([v for v in nums if v < 0.7995]) / len(nums) if nums else None
+        return [title, len(set(x["name"] for x in sub)), len(sub), len(nums), mean(nums), low]
+
+    text(1, f"宏利分紅表現概覽（報告年度 {year}）", True, 14, 28, NAVY)
+    text(2, f"自動生成｜擷取時間：{now}（香港時間）｜資料來源：宏利香港網站")
+    text(3, PAGE, color="0563C1")
+    text(5, "資料概況與整體表現", True, 11, 22, NAVY)
+    lines = []
+    for label, rows, _ in sheets:
+        lines.append(stat(f"{year} {label}", rows))
+        kinds = list(dict.fromkeys(x["kind"] for x in rows))
+        if len(kinds) > 1:
+            lines += [stat(f"　{k}", [x for x in rows if x["kind"] == k]) for k in kinds]
+    r = table(6, ["指標項目", "產品數", "行數", "有數字格數", "整體平均值", "低於 80% 的比例"], lines, {6: "0.0%"})
+    cats = list(dict.fromkeys(x["cat"] for _, rows, _ in sheets for x in rows if x["cat"]))
+    if cats:
+        text(r, "按產品種類的整體平均值", True, 11, 22, NAVY)
+        lines = [[cat] + [mean(numbers([x for x in rows if x["cat"] == cat])) for _, rows, _ in sheets] for cat in cats]
+        r = table(r + 1, ["產品種類"] + [label for label, _, _ in sheets], lines, {})
+    text(r, "定義與顏色說明", True, 11, 22, NAVY)
     notes = [
         "總現金價值比率：根據所有相關保單的實際總現金價值（包括保證及非保證成份），比對銷售時建議書上所示之預計總現金價值所計算的比率。",
         "分紅實現率：所有相關保單的實際累計非保證利益，比對銷售時建議書上所示之預計累計非保證利益所計算的比率。",
-        "高於 100% 表示實際高於投保時的預計。100% 或以上以綠底顯示，低於 80% 以紅底顯示。「不適用」為宏利網站原文。",
-        "兩張資料表的底部另有「當年平均值」及「持滿年期平均值」。",
+        "100% 或以上（綠色）：實際與投保時的預計一致或更高。低於 80%（紅色）：實際明顯低於投保時的預計。",
+        "「不適用」為宏利網站原文，表示該保單年度沒有相關數字。",
+    ]
+    for s in notes:
+        r += 1
+        text(r, s, height=32)
+    r += 2
+    text(r, "使用提示", True, 11, 22, NAVY)
+    tips = [
+        "兩張資料表第 3 行有篩選箭頭，可按產品種類、保單貨幣或紅利類型篩選；產品名稱及標題列已固定。",
+        "資料表底部的「持滿 N 年平均值」包含該保單年度及之後的所有數字；「當年平均值」只計算該保單年度一欄。",
+        "平均值為固定數字，已計入所有貨幣，不隨篩選變化。",
         "過往表現並不能作為分紅保險產品未來表現的指引。",
     ]
-    for i, s in enumerate(notes):
-        text(r + 1 + i, s, height=32)
+    for s in tips:
+        r += 1
+        text(r, s, height=22)
 
 
 def notion_upload(path, year):
@@ -391,26 +428,37 @@ def notion_upload(path, year):
         props = api("讀取資料來源", "GET", f"data_sources/{ds_id}")["properties"]
         title_prop = next(n for n, p in props.items() if p["type"] == "title")
         file_prop = next((n for n, p in props.items() if p["type"] == "files"), None)
+
+        def page_title(p):
+            return "".join(t.get("plain_text", "") for t in p["properties"][title_prop]["title"]).strip()
+
         found = api("尋找年度頁面", "POST", f"data_sources/{ds_id}/query",
-                    json={"filter": {"property": title_prop, "title": {"equals": year}}})["results"]
-        if found:
-            page = found[0]
-            print(f"Notion：找到「{year}」頁面")
+                    json={"filter": {"property": title_prop, "title": {"starts_with": year}}})["results"]
+        page = (next((p for p in found if page_title(p) == f"{year}年"), None)
+                or next((p for p in found if page_title(p) == year), None)
+                or (found[0] if found else None))
+        if page:
+            print(f"Notion：找到「{page_title(page)}」頁面")
         else:
             page = api("建立年度頁面", "POST", "pages",
                        json={"parent": {"type": "data_source_id", "data_source_id": ds_id},
-                             "properties": {title_prop: {"title": [{"text": {"content": year}}]}}})
-            print(f"Notion：已建立「{year}」頁面")
+                             "properties": {title_prop: {"title": [{"text": {"content": f"{year}年"}}]}}})
+            print(f"Notion：找不到年度頁面，已建立「{year}年」")
         fname = os.path.basename(path)
+        ascii_name = f"Manulife_{year}.xlsx"
+
+        def is_auto(n):
+            return n == fname or n.startswith("Manulife_")
+
         up = api("建立上傳", "POST", "file_uploads",
                  json={"mode": "single_part", "filename": fname, "content_type": XLSX})
         with open(path, "rb") as f:
-            api("傳送檔案", "POST", f"file_uploads/{up['id']}/send", files={"file": (fname, f, XLSX)})
+            api("傳送檔案", "POST", f"file_uploads/{up['id']}/send", files={"file": (ascii_name, f, XLSX)})
         new = {"name": fname, "type": "file_upload", "file_upload": {"id": up["id"]}}
         if file_prop:
             keep = []
             for x in page.get("properties", {}).get(file_prop, {}).get("files", []):
-                if x.get("name") == fname:
+                if is_auto(x.get("name", "")):
                     continue
                 if x.get("type") == "file":
                     keep.append({"name": x["name"], "type": "file", "file": {"url": x["file"]["url"]}})
@@ -424,12 +472,14 @@ def notion_upload(path, year):
                 print("注意：檔案數目比預期少，請到 Notion 檢查原有檔案")
         else:
             kids = api("讀取頁面內容", "GET", f"blocks/{page['id']}/children?page_size=100")["results"]
+            removed = 0
             for b in kids:
-                if b.get("type") == "file" and b["file"].get("name") == fname:
+                if b.get("type") == "file" and is_auto(b["file"].get("name", "")):
                     api("刪除舊檔", "DELETE", f"blocks/{b['id']}")
+                    removed += 1
             api("加入檔案", "PATCH", f"blocks/{page['id']}/children",
                 json={"children": [{"type": "file", "file": new}]})
-            print("Notion：資料庫沒有檔案欄，已把檔案放在頁面內容")
+            print(f"Notion：已把檔案放在頁面內容最底｜替換舊自動檔 {removed} 個｜其他內容不變")
         return True
     except Exception as e:
         print(f"Notion 上傳失敗｜{str(e)[:300]}")
@@ -472,12 +522,12 @@ def main():
         print("完全讀不到資料，沒有產生 Excel")
         sys.exit(1)
     wb = Workbook()
-    write_overview(wb.active, sheets, ycols, year, now)
+    write_overview(wb.active, sheets, year, now)
     wb.active.title = "概覽"
     for (label, rows, _), (_, _, _, kind_head) in zip(sheets, SETS):
-        write_sheet(wb.create_sheet(label), rows, ycols, ysubs, kind_head)
+        write_sheet(wb.create_sheet(f"{year} {label}"), f"宏利 {year} {label}", rows, ycols, ysubs, kind_head)
     os.makedirs("output", exist_ok=True)
-    path = f"output/Manulife_{year}.xlsx"
+    path = f"output/宏利總現金價值分紅實現率（{year}年）自動生成.xlsx"
     wb.save(path)
     print(f"已產生 {path}")
     if any(not rows for _, rows, _ in sheets):
