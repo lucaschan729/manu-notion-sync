@@ -1,85 +1,92 @@
-import html as htmllib
-import io
 import re
 import subprocess
 import sys
+from urllib.parse import urljoin
 
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "curl_cffi", "pdfplumber"])
-import pdfplumber
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "curl_cffi"])
 from curl_cffi import requests as creq
 
-BASE = "https://www.manulife.com.hk"
-PAGE = BASE + "/zh-hk/individual/products/understanding-your-participating-policy/fulfillment-ratio.html"
-PDF = BASE + "/content/dam/insurance/hk/zh-hk/documents/products/product-services/fulfillment-ratio.pdf"
+PAGE = "https://www.manulife.com.hk/zh-hk/individual/products/understanding-your-participating-policy/fulfillment-ratio.html"
+TOOLS = "https://tools.manulife.com.hk/"
+START = TOOLS + "fulfillment-ratio-2024/intro-zh.js"
 PCT = re.compile(r"\d+(?:\.\d+)?\s*%")
-FILES = re.compile(r"[\w/.:%~\-]+\.(?:pdf|json|xlsx|xls|csv)\b", re.I)
+REF = re.compile(r"""["'`(=]\s*([^"'`()\s<>=]+\.(?:js|json|html|htm|csv|xlsx|txt)(?:\?[^"'`()\s<>]*)?)""", re.I)
+SKIP = re.compile(r"jquery|bootstrap|analytics|gtm|polyfill|adobe|launch", re.I)
+KEYS = ["盈傳創富", "卓越終身保", "活耀人生", "分紅實現率", "總現金價值"]
+MAX_FILES = 40
 
 
 def get(url):
-    return creq.get(url, impersonate="chrome", timeout=180)
+    return creq.get(url, impersonate="chrome", headers={"Referer": PAGE}, timeout=120)
+
+
+def decode(content):
+    s = content.decode("utf-8", "replace")
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s).replace("\\/", "/")
 
 
 def one_line(s):
     return re.sub(r"\s+", " ", s)
 
 
-print("=== 第一部分：網頁 ===")
-r = get(PAGE)
-page = htmllib.unescape(r.content.decode("utf-8", "replace")).replace("\\/", "/")
-print(f"狀態 {r.status_code}｜大小 {len(r.content) // 1024} KB")
-files = sorted(set(FILES.findall(page)))
-print(f"檔案連結 {len(files)} 個：")
-for f in files[:40]:
-    print("  ", f[:160])
-seen = set()
-for m in re.finditer("分紅實現率", page):
-    snippet = one_line(page[max(m.start() - 120, 0):m.end() + 200])
-    if snippet not in seen:
-        seen.add(snippet)
-        print(f"出現位置 {len(seen)}：", snippet)
-try:
-    r2 = get(PAGE.replace(".html", ".model.json"))
-    body = r2.content.decode("utf-8", "replace")
-    print(f"model.json：狀態 {r2.status_code}｜大小 {len(r2.content) // 1024} KB｜百分比數字 {len(PCT.findall(body))} 個")
-except Exception as e:
-    print("model.json 失敗：", str(e)[:150])
+print("=== 其他年份的資料夾 ===")
+for y in ("2025", "2026"):
+    u = TOOLS + f"fulfillment-ratio-{y}/intro-zh.js"
+    try:
+        r = get(u)
+        print(f"{y}：狀態 {r.status_code}｜大小 {len(r.content) // 1024} KB")
+    except Exception as e:
+        print(f"{y}：失敗 {str(e)[:100]}")
 
 print()
-print("=== 第二部分：PDF ===")
-r = get(PDF)
-data = r.content
-print(f"狀態 {r.status_code}｜大小 {len(data) // 1024} KB｜是 PDF：{data[:4] == b'%PDF'}")
-texts, tables_by_page = [], []
-with pdfplumber.open(io.BytesIO(data)) as pdf:
-    for p in pdf.pages:
-        try:
-            texts.append(p.extract_text() or "")
-            tables_by_page.append(p.extract_tables() or [])
-        except Exception as e:
-            texts.append("")
-            tables_by_page.append([])
-            print(f"第 {len(texts)} 頁讀取失敗：{str(e)[:100]}")
-n = len(texts)
-pcts = [len(PCT.findall(t)) for t in texts]
-print(f"頁數 {n}｜有文字的頁 {sum(1 for t in texts if t.strip())}"
-      f"｜有表格的頁 {sum(1 for t in tables_by_page if t)}"
-      f"｜表格總數 {sum(len(t) for t in tables_by_page)}｜百分比數字 {sum(pcts)} 個")
-print("每頁（頁碼:表格數/百分比數）：",
-      " ".join(f"{i + 1}:{len(tables_by_page[i])}/{pcts[i]}" for i in range(n)))
-for i in range(min(2, n)):
-    print(f"第 {i + 1} 頁文字：", one_line(texts[i])[:400])
-target = next((i for i in range(n) if tables_by_page[i] and pcts[i] >= 5), None)
-if target is None:
-    print("找不到同時有表格和百分比數字的頁")
-else:
-    print(f"第 {target + 1} 頁（第一個有數字的表格頁）文字：", one_line(texts[target])[:600])
-    for row in tables_by_page[target][0][:8]:
-        print("  表格行：", "｜".join(one_line(str(c)) if c is not None else "" for c in row)[:220])
-for key in ("盈傳創富", "總現金價值比率"):
-    hit = next((i for i in range(n) if key in texts[i]), None)
-    if hit is None:
-        print(f"「{key}」：整份 PDF 找不到")
-    else:
-        t = one_line(texts[hit])
-        j = t.find(key)
-        print(f"「{key}」首次出現在第 {hit + 1} 頁：", t[max(j - 80, 0):j + 320])
+print("=== 逐個檔案 ===")
+queue, seen, found = [(START, 0)], {START}, []
+count = 0
+while queue and count < MAX_FILES:
+    url, depth = queue.pop(0)
+    count += 1
+    try:
+        r = get(url)
+    except Exception as e:
+        print(f"[{count}] {url[-90:]}：失敗 {str(e)[:100]}")
+        continue
+    kind = r.headers.get("Content-Type", "")
+    size = len(r.content)
+    print(f"[{count}] {url[-90:]}")
+    print(f"    狀態 {r.status_code}｜類型 {kind[:30]}｜大小 {size // 1024} KB")
+    if r.status_code != 200 or "html" not in kind and "json" not in kind and "javascript" not in kind and "text" not in kind:
+        continue
+    body = decode(r.content)
+    pcts = len(PCT.findall(body))
+    hits = {k: body.count(k) for k in KEYS if k in body}
+    refs = []
+    for ref in REF.findall(body):
+        full = urljoin(url, ref)
+        if "manulife" in full and not SKIP.search(full) and full not in refs:
+            refs.append(full)
+    print(f"    百分比數字 {pcts} 個｜關鍵字 {hits}｜連結 {len(refs)} 個")
+    for ref in refs[:25]:
+        print("      →", ref[-110:])
+    if pcts >= 20 or any(k in hits for k in KEYS[:3]):
+        found.append((url, size, pcts, hits))
+        i = max([body.find(k) for k in KEYS[:3]] + [-1])
+        if i < 0:
+            m = PCT.search(body)
+            i = m.start() if m else 0
+        print("    內容例子：", one_line(body[max(i - 300, 0):i + 500]))
+    if count == 1:
+        print("    檔案開頭：", one_line(body[:500]))
+    if depth < 3:
+        for ref in refs:
+            if ref not in seen:
+                seen.add(ref)
+                queue.append((ref, depth + 1))
+
+print()
+print("=== 總結 ===")
+print(f"已檢查 {count} 個檔案｜尚未檢查 {len(queue)} 個")
+if not found:
+    print("沒有找到含產品名稱或大量百分比數字的檔案")
+for url, size, pcts, hits in found:
+    print(f"有數字的檔案：{url}")
+    print(f"    大小 {size // 1024} KB｜百分比數字 {pcts} 個｜關鍵字 {hits}")
