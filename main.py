@@ -1,7 +1,6 @@
 import collections
 import datetime
 import html as htmllib
-import math
 import os
 import re
 import subprocess
@@ -25,10 +24,14 @@ PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 ITEM = re.compile(r"(selectedItem\w*)\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)")
 TAB = re.compile(r"""getProductDetails\w*\(\s*['"]([^'"]*)['"]\s*\)""")
 NO_CUR = ["", "null", "no"]
-NAVY, BAND, RED, GREY = "1F3864", "DDEBF7", "C00000", "8C8C8C"
+NAVY, GREY, DARK, PURPLE = "1F3864", "8C8C8C", "262626", "7030A0"
+SEP_FILL = PatternFill("solid", fgColor="EDEDED")
+GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")
+RED_FILL = PatternFill("solid", fgColor="FFC7CE")
 THIN = Side(style="thin", color="BFBFBF")
-LINE = Side(style="medium", color=NAVY)
+BOX = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+ROW_HEIGHT = 34
 
 
 def decode(content):
@@ -172,14 +175,6 @@ def fetch(label, url, prods, rows, ycols, ysubs, log):
             print(f"  {label}：已處理 {pi}/{len(prods)} 個產品｜累計 {len(rows)} 行", flush=True)
 
 
-def text_width(s):
-    return sum(2 if ord(c) > 0x2E7F else 1 for c in str(s))
-
-
-def line_count(s, w):
-    return max(1, math.ceil(text_width(s) / max(w - 2, 1)))
-
-
 def pct_format(v):
     return "0%" if abs(v * 100 - round(v * 100)) < 1e-6 else "0.0%"
 
@@ -199,7 +194,7 @@ def head_cell(c):
 
 
 def write_sheet(ws, rows, ycols, ysubs, kind_head):
-    cols = [("產品名稱", 26, "name"), ("產品種類", 14, "cat"), ("保單生效時期", 24, "period"), ("保單貨幣", 9, "cur")]
+    cols = [("產品名稱", 30, "name"), ("產品種類", 14, "cat"), ("保單生效時期", 22, "period"), ("保單貨幣", 9, "cur")]
     if len(set(r["kind"] for r in rows)) > 1:
         cols.append((kind_head, 11, "kind"))
     if any(r["note"] for r in rows):
@@ -210,34 +205,47 @@ def write_sheet(ws, rows, ycols, ysubs, kind_head):
         head_cell(ws.cell(row=1, column=i, value=h))
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.row_dimensions[1].height = 62
-    prev, band = None, False
-    for ri, r in enumerate(rows, 2):
-        new = r["name"] != prev
-        if new:
-            band, prev = not band, r["name"]
-        border = Border(top=LINE if new and ri > 2 else THIN, bottom=THIN, left=THIN, right=THIN)
+    ri, prev = 1, None
+    for r in rows:
+        if r["name"] != prev:
+            if prev is not None:
+                ri += 1
+                ws.cell(row=ri, column=1).fill = SEP_FILL
+                ws.merge_cells(start_row=ri, start_column=1, end_row=ri, end_column=len(heads))
+                ws.row_dimensions[ri].height = 9
+            prev = r["name"]
+        ri += 1
         for ci, (_, w, key) in enumerate(cols, 1):
             c = ws.cell(row=ri, column=ci, value=r[key])
-            c.font = Font(bold=key == "name", size=10)
+            if key == "name":
+                c.font = Font(bold=True, size=10, color=DARK)
+            elif key == "cur":
+                c.font = Font(bold=True, size=10, color=PURPLE)
+            else:
+                c.font = Font(size=10)
             c.alignment = Alignment(horizontal="left" if key in ("name", "period", "note") else "center",
                                     vertical="center", wrap_text=True)
+            c.border = BOX
         for j, k in enumerate(ycols):
             v = r["vals"].get(k, "")
             c = ws.cell(row=ri, column=len(cols) + 1 + j, value=v)
             c.alignment = CENTER
+            c.border = BOX
             if isinstance(v, float):
                 c.number_format = pct_format(v)
-                c.font = Font(size=10, bold=v < 0.8, color=RED if v < 0.8 else "000000")
+                if v >= 0.9995:
+                    c.fill = GREEN_FILL
+                    c.font = Font(size=10, color="006100")
+                elif v < 0.7995:
+                    c.fill = RED_FILL
+                    c.font = Font(size=10, bold=True, color="9C0006")
+                else:
+                    c.font = Font(size=10)
             else:
                 c.font = Font(size=9, color=GREY)
-        for ci in range(1, len(heads) + 1):
-            c = ws.cell(row=ri, column=ci)
-            c.border = border
-            if band:
-                c.fill = PatternFill("solid", fgColor=BAND)
-        ws.row_dimensions[ri].height = max(20, 15 * max(line_count(r[key], w) for _, w, key in cols) + 5)
+        ws.row_dimensions[ri].height = ROW_HEIGHT
     ws.freeze_panes = "B2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(heads))}{max(len(rows) + 1, 2)}"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(heads))}{max(ri, 2)}"
     ws.sheet_view.showGridLines = False
     ws.page_setup.orientation = "landscape"
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
@@ -279,7 +287,7 @@ def write_overview(ws, sheets, ycols, year, now):
             cells = [title, len(sub)] + averages(sub, ycols)
             for i, v in enumerate(cells, 1):
                 c = ws.cell(row=r, column=i, value=v)
-                c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+                c.border = BOX
                 c.font = Font(size=10, bold=i == 1)
                 c.alignment = Alignment(horizontal="left" if i == 1 else "center", vertical="center")
                 if i > 2 and v is not None:
@@ -288,7 +296,7 @@ def write_overview(ws, sheets, ycols, year, now):
     notes = [
         "總現金價值比率：根據所有相關保單的實際總現金價值（包括保證及非保證成份），比對銷售時建議書上所示之預計總現金價值所計算的比率。",
         "分紅實現率：所有相關保單的實際累計非保證利益，比對銷售時建議書上所示之預計累計非保證利益所計算的比率。",
-        "高於 100% 表示實際高於投保時的預計。低於 80% 以紅字顯示。「不適用」為宏利網站原文。",
+        "高於 100% 表示實際高於投保時的預計。100% 或以上以綠底顯示，低於 80% 以紅底顯示。「不適用」為宏利網站原文。",
         "過往表現並不能作為分紅保險產品未來表現的指引。",
     ]
     for i, s in enumerate(notes):
