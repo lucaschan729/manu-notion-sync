@@ -1,6 +1,8 @@
 name: 更新宏利資料
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 2 * 6 1"
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -10,10 +12,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python main.py
+      - name: Run python main.py
+        run: python main.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: manulife-excel
-          path: output/
-          if-no-files-found: warn
+          path: output/*.xlsx
